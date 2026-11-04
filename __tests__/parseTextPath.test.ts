@@ -4,11 +4,13 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import * as opentype from 'opentype.js'
 import { DEFAULT_OPTIONS } from '../src/const'
 import {
   getTextPaths,
   loadFontFromPath,
-  loadFontFromUrl
+  loadFontFromUrl,
+  serializePathData
 } from '../src/utils/parseTextPath'
 
 const RELATIVE_FONT = 'public/LiberationSerif-Bold.ttf'
@@ -69,19 +71,18 @@ describe('getTextPaths', () => {
     )
   })
 
-  it('emits path data, a bounding box and a triangulated mesh per glyph', async () => {
+  it('emits path data, a bounding box and a convex mesh per glyph', async () => {
     const [glyph] = await getTextPaths('H', 40, DEFAULT_OPTIONS.font)
 
     expect(glyph.pathData.startsWith('M')).toBe(true)
     expect(glyph.rect.width).toBeGreaterThan(0)
     expect(glyph.rect.height).toBeGreaterThan(0)
 
-    // 三角网格与同一份轮廓一一对应：索引按三元组组织，且不越界
-    const vertexCount = glyph.paths.vertices.length / 2
-    const indices = Array.from(glyph.paths.indices)
-    expect(vertexCount).toBeGreaterThan(0)
-    expect(indices.length % 3).toBe(0)
-    expect(Math.max(...indices)).toBeLessThan(vertexCount)
+    // 凸网格与同一份轮廓对应：每个凸块都是至少三个顶点的多边形
+    expect(glyph.paths.polygons.length).toBeGreaterThan(0)
+    for (const polygon of glyph.paths.polygons) {
+      expect(polygon.length).toBeGreaterThanOrEqual(3)
+    }
   })
 
   it('returns one entry per glyph and scales with font size', async () => {
@@ -107,6 +108,40 @@ describe('getTextPaths', () => {
 
   it('tolerates text without glyphs', async () => {
     expect(await getTextPaths('', 40, DEFAULT_OPTIONS.font)).toEqual([])
+  })
+})
+
+describe('serializePathData', () => {
+  it('separates coordinates that round to -0 from the previous number', () => {
+    const path = new opentype.Path()
+    path.moveTo(0.15, 0.08)
+    path.quadraticCurveTo(0.11, -0.004, 0.08, 0.06)
+    path.close()
+    // 上游 toPathData 对此输入输出 "Q0.110 0.08 0.06"，相邻数字粘连（opentypejs/opentype.js#881）
+    expect(serializePathData(path)).toBe('M0.15 0.08Q0.11 0 0.08 0.06Z')
+  })
+
+  it('keeps negative numbers compact without separators', () => {
+    const path = new opentype.Path()
+    path.moveTo(1, -2)
+    path.lineTo(-3.5, 4)
+    expect(serializePathData(path)).toBe('M1-2L-3.50 4')
+  })
+
+  it('serializes every command type a glyph outline can contain', () => {
+    const path = new opentype.Path()
+    path.moveTo(0, 0)
+    path.lineTo(1.5, 2)
+    path.bezierCurveTo(3, 4, 5, 6, 7, 8)
+    path.quadraticCurveTo(9, 10, 11, 12)
+    path.close()
+    expect(serializePathData(path)).toBe('M0 0L1.50 2C3 4 5 6 7 8Q9 10 11 12Z')
+  })
+
+  it('rounds coordinates to two decimal places', () => {
+    const path = new opentype.Path()
+    path.moveTo(0.12345, 1.999)
+    expect(serializePathData(path)).toBe('M0.12 2')
   })
 })
 

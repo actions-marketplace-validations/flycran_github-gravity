@@ -1,25 +1,85 @@
-import earcut from 'earcut'
 import * as opentype from 'opentype.js'
 import { pointsOnPath } from 'points-on-path'
+import type { Point, Polygon } from 'poly-decomp-es'
+import {
+  makeCCW,
+  quickDecomp,
+  removeCollinearPoints,
+  removeDuplicatePoints
+} from 'poly-decomp-es'
 import { SCALE } from '../const'
 import type { TextPathResult } from './physics'
 
-function svgPathToRapierTrimesh(path: string, scale = 1, tolerance = 1) {
+/**
+ * 把 SVG path 的每个子轮廓独立凹分解为凸多边形集合（顶点已按 scale 缩放）。
+ * 子轮廓之间互相独立处理：孔洞轮廓同样参与分解，即孔洞区域被视为实心
+ */
+function svgPathToConvexPolygons(
+  path: string,
+  scale = 1,
+  tolerance = 1
+): Polygon[] {
   const subPaths = pointsOnPath(path, tolerance)
-  const points = subPaths.flat()
 
-  const vertices = points.map(
-    ([x, y]) => [x * scale, y * scale] as [number, number]
-  )
-
-  const flatVertices = vertices.flat()
-
-  const indices = earcut(flatVertices)
-
-  return {
-    vertices: new Float32Array(flatVertices),
-    indices: new Uint32Array(indices)
+  const polygons: Polygon[] = []
+  for (const subPath of subPaths) {
+    // 采样点可能含重复点与共线点，会让分解产生退化凸块，先清理
+    const polygon: Point[] = subPath.map(
+      ([x, y]) => [x * scale, y * scale] as Point
+    )
+    removeDuplicatePoints(polygon, 0.01)
+    removeCollinearPoints(polygon, 0.01)
+    // 清理后不足 3 点的轮廓构不成多边形
+    if (polygon.length < 3) continue
+    makeCCW(polygon)
+    polygons.push(...quickDecomp(polygon))
   }
+  return polygons
+}
+
+/**
+ * 把 opentype 路径序列化为 SVG path data（保留 2 位小数）。
+ *
+ * 不用 Path#toPathData：它以原始值的正负决定是否补数字间的空格，而坐标四舍五入到
+ * -0 时负号会被丢掉，导致相邻数字粘连成畸形数据（opentypejs/opentype.js#881）。
+ * 这里改为按序列化结果是否以负号开头来补空格。
+ */
+export function serializePathData(path: opentype.Path): string {
+  // Number.isInteger 同时覆盖 round 到 0 与 -0 的情况：String(-0) 为 "0"，负号省略
+  const fmt = (v: number): string => {
+    const rounded = Math.round(v * 100) / 100
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2)
+  }
+  const pack = (values: number[]): string => {
+    let s = ''
+    values.forEach((v, i) => {
+      const str = fmt(v)
+      // 负数靠负号与前面的数字分隔，其余情况必须补空格
+      if (i > 0 && str[0] !== '-') s += ' '
+      s += str
+    })
+    return s
+  }
+
+  let d = ''
+  for (const cmd of path.commands) {
+    switch (cmd.type) {
+      case 'M':
+      case 'L':
+        d += `${cmd.type}${pack([cmd.x, cmd.y])}`
+        break
+      case 'C':
+        d += `C${pack([cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.x, cmd.y])}`
+        break
+      case 'Q':
+        d += `Q${pack([cmd.x1, cmd.y1, cmd.x, cmd.y])}`
+        break
+      case 'Z':
+        d += 'Z'
+        break
+    }
+  }
+  return d
 }
 
 /** 字体数据来源：本地路径、远程 URL（字符串或 URL 对象），或已读取好的字体数据 */
@@ -33,20 +93,17 @@ function viewToArrayBuffer(view: ArrayBufferView): ArrayBuffer {
   ) as ArrayBuffer
 }
 
-/** 从本地路径读取字体文件（相对路径按当前工作目录解析） */
+/** 从本地路径读取字体文件 */
 export async function loadFontFromPath(fontPath: string): Promise<ArrayBuffer> {
-  // node 模块按需加载：只有真正读取本地文件时才需要，浏览器环境不会引入它们
   const [{ readFileSync }, { resolve }] = await Promise.all([
     import('node:fs'),
     import('node:path')
   ])
-  // 相对路径按当前工作目录解析：模块自身路径在打包后会被压平，不能作为参照基准
   const resolvedPath = resolve(fontPath)
 
   try {
     return viewToArrayBuffer(readFileSync(resolvedPath))
   } catch (error) {
-    // 带上底层原因：读取失败可能是文件不存在，解析失败可能是不支持的文件格式
     const reason = error instanceof Error ? error.message : String(error)
     throw new Error(
       `Failed to load font "${resolvedPath}" (only .ttf/.otf are supported): ${reason}`,
@@ -55,7 +112,7 @@ export async function loadFontFromPath(fontPath: string): Promise<ArrayBuffer> {
   }
 }
 
-/** 从 URL 下载字体文件，支持 file: 与 http(s): 协议 */
+/** 从 URL 下载字体文件 */
 export async function loadFontFromUrl(
   fontUrl: string | URL
 ): Promise<ArrayBuffer> {
@@ -102,7 +159,7 @@ async function resolveFontData(font: FontSource): Promise<ArrayBuffer> {
 }
 
 /**
- * 解析文字为可渲染的轮廓路径，同时产出 SVG 用的 pathData 与物理用的三角网格。
+ * 解析文字为可渲染的轮廓路径，同时产出 SVG 用的 pathData 与物理用的凸多边形网格。
  *
  * @param font 字体来源（.ttf/.otf）：本地路径、URL、URL 字符串，或
  * Buffer / ArrayBuffer（如 `files[0].arrayBuffer()` 的结果）；省略时用内置字体
@@ -141,22 +198,21 @@ export async function getTextPaths(
 
   return paths.map((path) => {
     const bbox = path.getBoundingBox()
-    const pathData = path.toPathData(2)
+    const pathData = serializePathData(path)
 
-    let triangulated: ReturnType<typeof svgPathToRapierTrimesh>
+    let decomposed: Polygon[]
     try {
-      triangulated = svgPathToRapierTrimesh(pathData)
+      decomposed = svgPathToConvexPolygons(pathData)
     } catch (error) {
+      // 防御性包装：上游分解几乎不抛错，抛出时也带上字体来源便于定位
       throw new Error(
-        `Failed to triangulate a glyph from font "${describeFont(font)}". ` +
-          'Some fonts contain open or self-intersecting contours that the ' +
-          'triangulation algorithm cannot handle.',
+        `Failed to decompose a glyph from font "${describeFont(font)}"`,
         { cause: error }
       )
     }
 
     return {
-      paths: triangulated,
+      paths: { polygons: decomposed },
       pathData: pathData,
       rect: {
         x: bbox.x1,

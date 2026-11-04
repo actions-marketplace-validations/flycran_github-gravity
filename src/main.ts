@@ -27,18 +27,6 @@ function getAlgorithm(name: string): 'Greedy' | 'DP' | 'RDP' | undefined {
 /**
  * GitHub Action 入口：生成 GitHub 贡献图重力跌落动画 SVG。
  *
- * 输入参数：
- * - username: GitHub 用户名（必填）
- * - text: 显示的文字，默认为 username
- * - output-path: SVG 输出路径，默认为 gravity.svg
- * - font-size: 文字大小，默认为 48
- * - compression-tolerance: 轨迹压缩容差（SVG 像素），默认为 0.5
- * - compression-algorithm: 轨迹压缩算法（Greedy / DP / RDP），默认为 Greedy
- * - max-simulation-time: 最大模拟时间（秒，按播放时长计，会乘以倍速换算模拟时长），达到后返回已模拟的轨迹；不传则模拟到静止为止
- * - scale: SVG 显示缩放，默认为 3
- * - speed: 播放倍速，默认为 3
- * - width / height / size / interval / font-path: 高级自定义项，改动影响渲染效果
- *
  * 输出：
  * - svg-path: 生成的 SVG 文件路径
  */
@@ -53,6 +41,8 @@ export async function run(): Promise<void> {
     const backgroundColor: string =
       core.getInput('background-color') || 'transparent'
     const textColor: string = core.getInput('text-color') || 'black'
+    const css = core.getInput('css') === 'true'
+    const animation = core.getInput('animation') || undefined
     const compressionTolerance = getOptionalNumber('compression-tolerance')
     const compressionAlgorithm = getAlgorithm('compression-algorithm')
     const maxSimulationTime = getOptionalNumber('max-simulation-time')
@@ -62,6 +52,8 @@ export async function run(): Promise<void> {
     const height = getOptionalNumber('height')
     const size = getOptionalNumber('size')
     const interval = getOptionalNumber('interval')
+    const friction = getOptionalNumber('friction')
+    const restitution = getOptionalNumber('restitution')
     const fontPath = core.getInput('font-path')
 
     core.info(`Generating gravity SVG for user: ${username}`)
@@ -77,6 +69,8 @@ export async function run(): Promise<void> {
       textTop,
       backgroundColor,
       textColor,
+      css,
+      animation,
       compressionTolerance,
       compressionAlgorithm,
       maxSimulationTime,
@@ -86,6 +80,8 @@ export async function run(): Promise<void> {
       height,
       size,
       interval,
+      friction,
+      restitution,
       font: fontPath || undefined
     })
 

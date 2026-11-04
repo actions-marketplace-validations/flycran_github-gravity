@@ -141,12 +141,6 @@ export function simplifyTrajectoryDP(
  * 递归分裂，每次在当前段内找时刻插值偏差最大的点作为新关键帧，
  * 直到所有被丢弃点的偏差都落入容差。
  *
- * 保证：
- * - 首尾点必保留，返回点按原始顺序排列；
- * - 任意被丢弃点在其原始时刻与相邻关键帧插值位置的偏差不超过 tolerance；
- * - 贪心分裂非全局最优，关键帧数一般多于动态规划；
- * - span >= 1（首点为 0），span 总和等于原始点数 - 1。
- *
  * @param maxRotationError 含义同 simplifyTrajectoryDP 的同名参数
  */
 export function simplifyTrajectoryRDP(
@@ -216,12 +210,6 @@ export function simplifyTrajectoryRDP(
  * 从当前关键帧出发不断扩展段尾，直到加入下一点会使段内某点的
  * 时刻插值偏差超出容差，此时该段尾即为下一个关键帧。
  *
- * 保证：
- * - 首尾点必保留，返回点按原始顺序排列；
- * - 任意被丢弃点在其原始时刻与相邻关键帧插值位置的偏差不超过 tolerance；
- * - 单遍、不回溯，关键帧数通常介于 RDP 与动态规划之间；
- * - span >= 1（首点为 0），span 总和等于原始点数 - 1。
- *
  * @param maxRotationError 含义同 simplifyTrajectoryDP 的同名参数
  */
 export function simplifyTrajectoryGreedy(
@@ -262,10 +250,6 @@ export function simplifyTrajectoryGreedy(
  * 耗时却低一个数量级：DP 的端点对 × 段检查随轨迹长度超线性膨胀，
  * 长轨迹（数千步）会到秒级，Greedy 稳定在毫秒级。
  * 追求极致体积且能接受秒级耗时时可显式改用 simplifyTrajectoryDP。
- *
- * tolerance=0 为完全无损：只有插值精确命中的匀速直线段/静止段被合并，
- * 位置与播放节奏（速度）都不失真；tolerance>0 时保证播放中
- * 每个原始时刻的插值位置误差不超过 tolerance。
  */
 export function simplifyTrajectory(
   trajectory: Point[],
@@ -276,15 +260,15 @@ export function simplifyTrajectory(
 }
 
 /**
- * 将简化轨迹的 span 转为 SMIL animateTransform 的 keyTimes 属性值：
- * 各关键帧时刻 = span 前缀和占总和的比例，首帧恒为 0、末帧恒为 1。
- * 轨迹未携带 span（未启用压缩）时返回 null，消费端回退到 SMIL 默认均分时间。
+ * 将简化轨迹的 span 归一化为关键帧时刻数组：各时刻 = span 前缀和占总和的比例，
+ * 首帧恒为 0、末帧恒为 1。未启用压缩（无 span）时返回 null，消费端按各引擎的
+ * 默认均分时间处理。
  */
-export function buildKeyTimes(
+export function buildKeyTimesArray(
   trajectory: {
     span?: number
   }[]
-): string | null {
+): number[] | null {
   if (trajectory.length < 2 || trajectory[0].span === undefined) return null
 
   const total = trajectory.reduce((sum, p) => sum + (p.span ?? 0), 0)
@@ -292,13 +276,18 @@ export function buildKeyTimes(
   let acc = 0
   for (const p of trajectory.slice(1)) {
     acc += p.span ?? 0
-    // SMIL 要求 keyTimes 严格递增：归一化后夹到 [prev + 1e-6, 0.999999]，
-    // 避免极长轨迹下小数舍入把相邻值舍成相同
+    // 严格递增：相邻至少差 1e-6，避免长轨迹舍入后相邻值相同
     const prev = keyTimes[keyTimes.length - 1]
     const t = +(acc / total).toFixed(6)
     keyTimes.push(Math.min(Math.max(t, prev + 1e-6), 0.999999))
   }
   // 末帧强制为 1，消除累计浮点误差
   keyTimes[keyTimes.length - 1] = 1
-  return keyTimes.join(';')
+  return keyTimes
+}
+
+/** 将关键帧时刻数组序列化为 SMIL animateTransform 的 keyTimes 属性值 */
+export function buildKeyTimes(trajectory: { span?: number }[]): string | null {
+  const keyTimes = buildKeyTimesArray(trajectory)
+  return keyTimes ? keyTimes.join(';') : null
 }
