@@ -137,7 +137,7 @@ export function pruneFallenBlocks(
   }
 }
 
-async function createWord(width: number, height: number) {
+async function createWorld(width: number, height: number) {
   await init()
   // 重力
   const world = new World({ x: 0.0, y: -9.81 })
@@ -179,9 +179,6 @@ export interface TextPathResult {
 
 /**
  * 计算所有字形的整体包围盒
- * @param textPaths
- * @param param1
- * @returns
  */
 export function getTextBoundBox(
   textPaths: TextPathResult[],
@@ -215,10 +212,9 @@ export function getTextBoundBox(
   }
 }
 
-/** 渲染用贡献方块：轨迹已统一为关键帧形态（未压缩时为无 span 的全量关键帧） */
-export interface RenderedContribution {
-  date: string
-  color: string
+/** 渲染产物：模拟产出的贡献方块叠加压缩后的轨迹 */
+export interface RenderedContribution
+  extends Omit<ContributionJson, 'trajectory'> {
   trajectory: Trajectory
 }
 
@@ -233,6 +229,12 @@ export interface SimulationResult {
   centerY: number
 }
 
+/** 纯物理模拟的结果：轨迹为未经压缩的原始采样序列 */
+export interface RawSimulationResult
+  extends Omit<SimulationResult, 'contributions'> {
+  contributions: ContributionJson[]
+}
+
 export interface SimulationOptions {
   username: string
   text?: string
@@ -241,8 +243,8 @@ export interface SimulationOptions {
   /** 字体大小 */
   fontSize?: number
   /**
-   * 轨迹压缩容差，单位 SVG 像素。播放时每个原始时刻的插值坐标与真实坐标
-   * 在横向、纵向上各自的偏差不超过该值
+   * 轨迹压缩容差，单位 SVG 坐标单位。播放时每个原始时刻的插值坐标与真实坐标
+   * 的偏差不超过该值（CSS 引擎按轴向、SMIL 按合成位移）
    */
   compressionTolerance?: number
   /** 禁用轨迹压缩，保留完整轨迹。调试用途，action无法禁用压缩 */
@@ -337,7 +339,7 @@ export async function createSimulationWorld(
     restitution,
     calendarList
   } = withDefaults(DEFAULT_OPTIONS, options)
-  const world = await createWord(width, height)
+  const world = await createWorld(width, height)
   const contributions: Contribution[] = []
 
   // 创建用户名文字静止碰撞体（居中对齐）
@@ -385,10 +387,6 @@ export async function createSimulationWorld(
     for (let j = 0; j < col.length; j++) {
       const contributionDay = col[j]
 
-      if (!contributionDay.date) {
-        console.log(contributionDay)
-      }
-
       const dayOfWeek = new Date(contributionDay.date).getDay()
 
       if (contributionDay.count) {
@@ -428,26 +426,18 @@ export async function createSimulationWorld(
 }
 
 /**
- * 开始模拟
+ * 纯物理模拟：方块自由落体、碰撞、静止收敛，轨迹保留全部原始采样，
+ * 不做任何压缩。需要压缩产物时使用 startSimulation。
  */
-export async function startSimulation(
+export async function simulateRaw(
   options: SimulationOptions
-): Promise<SimulationResult> {
-  const {
-    shape,
-    size,
-    compressionAlgorithm,
-    compressionTolerance,
-    disableCompression,
-    jointPosition,
-    maxSimulationTime,
-    speed
-  } = withDefaults(DEFAULT_OPTIONS, options)
+): Promise<RawSimulationResult> {
+  const { size, maxSimulationTime, speed } = withDefaults(
+    DEFAULT_OPTIONS,
+    options
+  )
   const { world, contributions, textPaths, offsetX, centerY } =
     await createSimulationWorld(options)
-
-  // 容差从 SVG 像素换算回物理坐标单位，让压缩函数与渲染缩放解耦；
-  const tolerance = compressionTolerance / SCALE
 
   /** 判断所有贡献块的刚体是否都已静止（线速度与角速度均低于阈值） */
   function areAllCollidersSleeping(): boolean {
@@ -512,28 +502,51 @@ export async function startSimulation(
   return {
     stepCount,
     time: endTime - startTime,
-    contributions: contributions.map((contribution): RenderedContribution => {
-      const json = contribution.toJSON()
-      // 位置与自转按各自容差独立分段，旋转剧变不会迫使位置加密
-      return {
-        date: json.date,
-        color: json.color,
-        trajectory: disableCompression
-          ? toKeyframeTrajectory(json.trajectory)
-          : compressTrajectory(
-              json.trajectory,
-              tolerance,
-              shape === 'square' ? MAX_ROTATION_ERROR : 0,
-              compressionAlgorithm,
-              jointPosition
-            )
-      }
-    }),
+    contributions: contributions.map((contribution) => contribution.toJSON()),
     textPaths: textPaths.map(({ pathData, rect }) => ({
       pathData: pathData,
       rect: rect
     })),
     offsetX,
     centerY
+  }
+}
+
+/**
+ * 物理模拟 + 轨迹压缩：action 与网页播放器的入口。
+ * disableCompression 时跳过压缩，返回逐帧关键帧的完整轨迹。
+ */
+export async function startSimulation(
+  options: SimulationOptions
+): Promise<SimulationResult> {
+  const {
+    shape,
+    compressionAlgorithm,
+    compressionTolerance,
+    disableCompression,
+    jointPosition
+  } = withDefaults(DEFAULT_OPTIONS, options)
+  const raw = await simulateRaw(options)
+
+  // 容差从 SVG 坐标单位换算回物理坐标单位，让压缩函数与渲染缩放解耦
+  const tolerance = compressionTolerance / SCALE
+  // 位置与自转按各自容差独立分段，旋转剧变不会迫使位置加密
+  const maxRotationError = shape === 'square' ? MAX_ROTATION_ERROR : 0
+
+  return {
+    ...raw,
+    contributions: raw.contributions.map(({ date, color, trajectory }) => ({
+      date,
+      color,
+      trajectory: disableCompression
+        ? toKeyframeTrajectory(trajectory)
+        : compressTrajectory(
+            trajectory,
+            tolerance,
+            maxRotationError,
+            compressionAlgorithm,
+            jointPosition
+          )
+    }))
   }
 }

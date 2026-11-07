@@ -23,7 +23,8 @@ inputs:
     default: '48'
   compression-tolerance:
     description: >-
-      Trajectory compression tolerance in SVG pixels. At every original moment of the
+      Trajectory compression tolerance in SVG coordinate units (user units; one
+      unit spans scale on-screen pixels). At every original moment of the
       animation, the interpolated position stays within this distance of the real one
       (per axis with the CSS engine, combined offset with SMIL), which shrinks the SVG
       at the cost of a small visual approximation. 0 keeps the trajectory lossless in
@@ -131,6 +132,13 @@ inputs:
       Defaults to the bundled Liberation Serif Bold. Use with caution: some fonts contain open
       or self-intersecting contours that the triangulation algorithm rejects, and some cannot
       be parsed by opentype.js at all.
+    required: false
+  token:
+    description: >-
+      Optional GitHub token. When this input is set, or GITHUB_TOKEN is present
+      in the environment, contributions are fetched from the official GraphQL
+      API; otherwise the public gh-calendar API is used as a fallback.
+      Pass `secrets.GITHUB_TOKEN` from the workflow.
     required: false
 
 outputs:
